@@ -30,6 +30,7 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import com.google.android.exoplayer2.C;
+import com.google.android.exoplayer2.DefaultRenderersFactory;
 import com.google.android.exoplayer2.ExoPlayer;
 import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.PlaybackException;
@@ -329,8 +330,12 @@ public class PlayerActivity extends AppCompatActivity
 
   private void setRenderersFactory(
       ExoPlayer.Builder playerBuilder, boolean preferExtensionDecoders) {
-    RenderersFactory renderersFactory =
-        DemoUtil.buildRenderersFactory(/* context= */ this, preferExtensionDecoders);
+    RenderersFactory renderersFactory = new DefaultRenderersFactory(this);
+    ((DefaultRenderersFactory) renderersFactory).forceEnableMediaCodecAsynchronousQueueing();
+    ((DefaultRenderersFactory) renderersFactory).setEnableDecoderFallback(true);
+
+//    RenderersFactory renderersFactory =
+//        DemoUtil.buildRenderersFactory(/* context= */ this, preferExtensionDecoders);
     playerBuilder.setRenderersFactory(renderersFactory);
   }
 

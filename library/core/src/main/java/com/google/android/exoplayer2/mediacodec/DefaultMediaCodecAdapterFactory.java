@@ -103,6 +103,11 @@ public final class DefaultMediaCodecAdapterFactory implements MediaCodecAdapter.
   @Override
   public MediaCodecAdapter createAdapter(MediaCodecAdapter.Configuration configuration)
       throws IOException {
+    // 版本大于 23 ，则需要判断外部是否设置支持异步解码，默认是 MODE_DEFAULT。
+    // 如果设置了 MODE_ENABLED，则创建 AsynchronousMediaCodecAdapter 实例。
+    // 如果设置了 MODE_DISABLED，则创建 SynchronousMediaCodecAdapter 实例。
+    // 如果版本小于 23，则创建 SynchronousMediaCodecAdapter 实例。
+    // 如果版本大于等于 31，则创建 AsynchronousMediaCodecAdapter 实例。
     if (Util.SDK_INT >= 23
         && (asynchronousMode == MODE_ENABLED
             || (asynchronousMode == MODE_DEFAULT && Util.SDK_INT >= 31))) {

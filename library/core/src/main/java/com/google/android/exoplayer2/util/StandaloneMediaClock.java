@@ -21,6 +21,8 @@ import com.google.android.exoplayer2.PlaybackParameters;
  * A {@link MediaClock} whose position advances with real time based on the playback parameters when
  * started.
  *
+ * MediaClock ，其位置根据启动时的播放参数实时前进。
+ *
  * @deprecated com.google.android.exoplayer2 is deprecated. Please migrate to androidx.media3 (which
  *     contains the same ExoPlayer code). See <a
  *     href="https://developer.android.com/guide/topics/media/media3/getting-started/migration-guide">the
@@ -49,6 +51,7 @@ public final class StandaloneMediaClock implements MediaClock {
   /** Starts the clock. Does nothing if the clock is already started. */
   public void start() {
     if (!started) {
+      // 存储 clock.elapsedRealtime() 的值作为 baseElapsedMs
       baseElapsedMs = clock.elapsedRealtime();
       started = true;
     }
@@ -68,6 +71,7 @@ public final class StandaloneMediaClock implements MediaClock {
    * @param positionUs The position to set in microseconds.
    */
   public void resetPosition(long positionUs) {
+    Log.i("StandaloneMediaClock", "resetPosition: positionUs = " + positionUs);
     baseUs = positionUs;
     if (started) {
       baseElapsedMs = clock.elapsedRealtime();
@@ -78,6 +82,7 @@ public final class StandaloneMediaClock implements MediaClock {
   public long getPositionUs() {
     long positionUs = baseUs;
     if (started) {
+      // 计算和 baseElapsedMs 之间的时间差
       long elapsedSinceBaseMs = clock.elapsedRealtime() - baseElapsedMs;
       if (playbackParameters.speed == 1f) {
         positionUs += Util.msToUs(elapsedSinceBaseMs);

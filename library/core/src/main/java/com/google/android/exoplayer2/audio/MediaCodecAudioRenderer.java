@@ -639,10 +639,12 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     return audioSink.hasPendingData() || super.isReady();
   }
 
+  //这里是获取音频时钟
   @Override
   public long getPositionUs() {
     if (getState() == STATE_STARTED) {
       updateCurrentPosition();
+      Log.i(TAG, "getPositionUs: " + currentPositionUs);
     }
     return currentPositionUs;
   }
@@ -878,6 +880,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     return mediaFormat;
   }
 
+  /**
+   * 这个函数的意义实际上就是在更新类变量newCurrentPositionUs的值
+   */
   private void updateCurrentPosition() {
     long newCurrentPositionUs = audioSink.getCurrentPositionUs(isEnded());
     if (newCurrentPositionUs != AudioSink.CURRENT_POSITION_NOT_SET) {

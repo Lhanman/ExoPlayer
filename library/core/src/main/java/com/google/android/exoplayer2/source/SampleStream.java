@@ -42,6 +42,9 @@ public interface SampleStream {
   /**
    * Flags that can be specified when calling {@link #readData}. Possible flag values are {@link
    * #FLAG_PEEK}, {@link #FLAG_REQUIRE_FORMAT} and {@link #FLAG_OMIT_SAMPLE_DATA}.
+   *
+   * 这些标志可以单独使用，也可以组合使用（通过按位或操作）。
+   * 例如，FLAG_PEEK | FLAG_OMIT_SAMPLE_DATA 可以用来预览样本元数据而不移动读取位置或加载实际数据。
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -50,7 +53,11 @@ public interface SampleStream {
       flag = true,
       value = {FLAG_PEEK, FLAG_REQUIRE_FORMAT, FLAG_OMIT_SAMPLE_DATA})
   @interface ReadFlags {}
-  /** Specifies that the read position should not be advanced if a sample buffer is read. */
+  /** Specifies that the read position should not be advanced if a sample buffer is read.
+   *
+   * 指示读取操作不应该前进读取位置。
+   * 用于预览数据而不实际消耗它。
+   * */
   int FLAG_PEEK = 1;
   /**
    * Specifies that if a sample buffer would normally be read next, the format of the stream should
@@ -64,6 +71,10 @@ public interface SampleStream {
    *   <li>If an end of stream buffer would be read were the flag not set, then behavior is
    *       unchanged.
    * </ul>
+   *
+   * 要求读取流的格式信息，而不是样本数据。
+   * 如果正常情况下会读取样本缓冲区，这个标志会使其读取流格式信息。
+   * 如果正常情况下不会读取任何内容，但流格式已知，则会读取流格式信息。
    */
   int FLAG_REQUIRE_FORMAT = 1 << 1;
   /**
@@ -73,6 +84,9 @@ public interface SampleStream {
    * <p>This flag is useful for efficiently reading or (when combined with {@link #FLAG_PEEK})
    * peeking sample metadata. It can also be used for efficiency by a caller wishing to skip a
    * sample buffer.
+   *
+   * 指示在读取样本缓冲区时不填充实际的样本数据。
+   * 用于高效地读取或预览样本元数据，或者用于跳过样本数据。
    */
   int FLAG_OMIT_SAMPLE_DATA = 1 << 2;
 

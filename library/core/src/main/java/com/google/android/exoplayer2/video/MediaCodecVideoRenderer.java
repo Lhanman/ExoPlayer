@@ -186,6 +186,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   /* package */ @Nullable OnFrameRenderedListenerV23 tunnelingOnFrameRenderedListener;
   @Nullable private VideoFrameMetadataListener frameMetadataListener;
 
+  private long lastOnFrameRenderPts = 0L;
+
   /**
    * @param context A context.
    * @param mediaCodecSelector A decoder selector.
@@ -852,6 +854,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
   @Override
   public void render(long positionUs, long elapsedRealtimeUs) throws ExoPlaybackException {
     super.render(positionUs, elapsedRealtimeUs);
+    //若支持滤镜
     if (videoFrameProcessorManager.isEnabled()) {
       videoFrameProcessorManager.releaseProcessedFrames(positionUs, elapsedRealtimeUs);
     }
@@ -976,8 +979,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     codecHandlesHdr10PlusOutOfBandMetadata =
         checkNotNull(getCodecInfo()).isHdr10PlusOutOfBandMetadataSupported();
     if (Util.SDK_INT >= 23 && tunneling) {
-      tunnelingOnFrameRenderedListener = new OnFrameRenderedListenerV23(checkNotNull(getCodec()));
     }
+    tunnelingOnFrameRenderedListener = new OnFrameRenderedListenerV23(checkNotNull(getCodec()));
     videoFrameProcessorManager.onCodecInitialized(name);
   }
 
@@ -1136,7 +1139,6 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     if (initialPositionUs == C.TIME_UNSET) {
       initialPositionUs = positionUs;
     }
-
     if (bufferPresentationTimeUs != lastBufferPresentationTimeUs) {
       if (!videoFrameProcessorManager.isEnabled()) {
         frameReleaseHelper.onNextFrame(bufferPresentationTimeUs);
@@ -1144,16 +1146,20 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       this.lastBufferPresentationTimeUs = bufferPresentationTimeUs;
     }
 
+    //基准时间戳，通常是0
     long outputStreamOffsetUs = getOutputStreamOffsetUs();
+    //通过bufferPresentationTimeUs和outputStreamOffsetUs计算出最终video pts. 对视频buffer队列中的当前帧时间戳进行一个校准
     long presentationTimeUs = bufferPresentationTimeUs - outputStreamOffsetUs;
-
+    //只解码不渲染的逻辑
     if (isDecodeOnlyBuffer && !isLastBuffer) {
       skipOutputBuffer(codec, bufferIndex, presentationTimeUs);
       return true;
     }
 
     // Note: Use of double rather than float is intentional for accuracy in the calculations below.
+    // （为了实现以下计算的准确性，故意使用double而不是float。）
     boolean isStarted = getState() == STATE_STARTED;
+    //获取当前时间戳，用于后面计算earlyUs。是将运行程序的时间也计算到音画同步上，这样音画同步精度更高。保证 video 更接近 audio 时钟
     long elapsedRealtimeNowUs = SystemClock.elapsedRealtime() * 1000;
     long earlyUs =
         calculateEarlyTimeUs(
@@ -1163,6 +1169,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
             bufferPresentationTimeUs,
             isStarted);
 
+    // surface 未准备好，跳帧
     if (displaySurface == placeholderSurface) {
       // Skip frames in sync with playback, so we'll be at the right frame if the mode changes.
       if (isBufferLate(earlyUs)) {
@@ -1173,6 +1180,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       return false;
     }
 
+    //处理首帧或长时间未渲染的情况下，强制渲染
     boolean forceRenderOutputBuffer = shouldForceRender(positionUs, earlyUs);
     if (forceRenderOutputBuffer) {
       boolean notifyFrameMetaDataListener;
@@ -1197,19 +1205,31 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
 
     // Compute the buffer's desired release time in nanoseconds.
     long systemTimeNs = System.nanoTime();
+    // 计算出未经校准的下次送显预计时间（纳秒）
     long unadjustedFrameReleaseTimeNs = systemTimeNs + (earlyUs * 1000);
+    Log.i(TAG, "unadjustedFrameReleaseTimeNs = " + unadjustedFrameReleaseTimeNs + ", early Us = " + earlyUs + ", bufferPts= " + bufferPresentationTimeUs + ",position = " + positionUs);
 
     // Apply a timestamp adjustment, if there is one.
+    // 对预计送显时间进行校准，联合 vsync 机制，保证视频帧丝滑输出，避免卡顿
     long adjustedReleaseTimeNs = frameReleaseHelper.adjustReleaseTime(unadjustedFrameReleaseTimeNs);
+    //不支持滤镜，则进行下面计算
     if (!videoFrameProcessorManager.isEnabled()) {
+      // 计算实际送显时间和当前时间的差值，正值表示还没可以送显，表示来早了。反之则表示迟了
       earlyUs = (adjustedReleaseTimeNs - systemTimeNs) / 1000;
-    } // else, use the unadjusted earlyUs in previewing use cases.
+    } // else, use the unadjusted earlyUs in previewing use cases. （否则，在预览用例中使用未调整的earlyUs。）
 
+    Log.i(TAG, "adjust early us = " + earlyUs);
     boolean treatDroppedBuffersAsSkipped = joiningDeadlineMs != C.TIME_UNSET;
+    // 通过一些阈值条件，判断是否需要丢弃当前帧， 该帧迟到 500ms，则以音频时钟为准，定位到这之前的一个关键帧上，丢弃关键帧之前的帧。
+    // （简单来说就是丢帧，丢到关键帧处，若没关键帧，则丢到音频时钟位置）
     if (shouldDropBuffersToKeyframe(earlyUs, elapsedRealtimeUs, isLastBuffer)
         && maybeDropBuffersToKeyframe(positionUs, treatDroppedBuffersAsSkipped)) {
+      Log.w(TAG, "drop buffer to keyframe");
       return false;
     } else if (shouldDropOutputBuffer(earlyUs, elapsedRealtimeUs, isLastBuffer)) {
+      // 帧晚了 30ms。要么丢帧要么跳帧。treatDroppedBuffersAsSkipped 只是用于标志是否把丢帧看成跳帧。逻辑就解码器来说都是丢帧，会做一下统计数据上差异。
+      //   boolean treatDroppedBuffersAsSkipped = joiningDeadlineMs != C.TIME_UNSET; 若为 true，表示存在跳转行为（可以认为当前延迟是由于跳帧导致的而非丢帧）
+      Log.w(TAG, "drop buffer.");
       if (treatDroppedBuffersAsSkipped) {
         skipOutputBuffer(codec, bufferIndex, presentationTimeUs);
       } else {
@@ -1219,6 +1239,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       return true;
     }
 
+    // 若支持滤镜，则走下面逻辑
     if (videoFrameProcessorManager.isEnabled()) {
       videoFrameProcessorManager.releaseProcessedFrames(positionUs, elapsedRealtimeUs);
       if (videoFrameProcessorManager.maybeRegisterFrame(format, presentationTimeUs, isLastBuffer)) {
@@ -1233,17 +1254,24 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       return false;
     }
 
+    // 视频帧没有特别晚到，存在早到情况
     if (Util.SDK_INT >= 21) {
       // Let the underlying framework time the release.
       if (earlyUs < 50000) {
+        Log.i(TAG, "adjust pts = " + adjustedReleaseTimeNs + ", system = " + SystemClock.elapsedRealtimeNanos());
+        Log.i(TAG, "release time interval = " + (adjustedReleaseTimeNs - lastFrameReleaseTimeNs) / 1_000_000 + "ms");
         if (adjustedReleaseTimeNs == lastFrameReleaseTimeNs) {
           // This frame should be displayed on the same vsync with the previous released frame. We
           // are likely rendering frames at a rate higher than the screen refresh rate. Skip
           // this buffer so that it's returned to MediaCodec sooner otherwise MediaCodec may not
           // be able to keep decoding with this rate [b/263454203].
+          //表示这个帧应该在上一个释放的帧上显示。我们可能以高于屏幕刷新率的速率渲染帧。
+          // 跳过这个缓冲区，以便更快地将其返回给MediaCodec，否则MediaCodec可能无法保持以这个速率解码。
+          Log.i(TAG, "Skipping frame with the same adjusted release time as the previous frame.");
           skipOutputBuffer(codec, bufferIndex, presentationTimeUs);
         } else {
           notifyFrameMetadataListener(presentationTimeUs, adjustedReleaseTimeNs, format);
+          // 让 MediaCodec 底层框架在 adjustedReleaseTimeNs 进行渲染
           renderOutputBufferV21(codec, bufferIndex, presentationTimeUs, adjustedReleaseTimeNs);
         }
         updateVideoFrameProcessingOffsetCounters(earlyUs);
@@ -1252,10 +1280,13 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       }
     } else {
       // We need to time the release ourselves.
+      // 由于 21 以下的版本不支持Mediacodec 调整渲染时间，所以我们需要自己计算时间
       if (earlyUs < 30000) {
         if (earlyUs > 11000) {
           // We're a little too early to render the frame. Sleep until the frame can be rendered.
           // Note: The 11ms threshold was chosen fairly arbitrarily.
+          // 我们渲染帧的时间稍早。睡眠，直到可以渲染帧。
+          // 注意：11ms的阈值是相当随意选择的。如果是 11ms 内的延时，直接渲染
           try {
             // Subtracting 10000 rather than 11000 ensures the sleep time will be at least 1ms.
             Thread.sleep((earlyUs - 10000) / 1000);
@@ -1312,14 +1343,18 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       long bufferPresentationTimeUs,
       boolean isStarted) {
     // Note: Use of double rather than float is intentional for accuracy in the calculations below.
+    // （为了实现以下计算的准确性，故意使用double而不是float。）获取倍速播放的速度
     double playbackSpeed = getPlaybackSpeed();
 
     // Calculate how early we are. In other words, the realtime duration that needs to elapse whilst
     // the renderer is started before the frame should be rendered. A negative value means that
     // we're already late.
+    // 计算我们有多早。换句话说，渲染器启动时需要经过的实时持续时间，然后才能渲染帧。负值表示我们已经迟到了。
+    //这里就是计算出视频pts和音频pts的差值，这是我们需要调整的时间，这个时间是根据音频来调整的，因为音频是主要的时间轴。
     long earlyUs = (long) ((bufferPresentationTimeUs - positionUs) / playbackSpeed);
     if (isStarted) {
       // Account for the elapsed time since the start of this iteration of the rendering loop.
+      // 考虑程序运行的耗时，减去了程序运行到这里的耗时。这样可以更精确的计算出视频的pts. 比如： 在代码执行到这的这段时间，音频还是一直在写入数据的，实际上就相当于音频的时间戳变大了。所以需要再减去这段时间
       earlyUs -= elapsedRealtimeNowUs - elapsedRealtimeUs;
     }
 
@@ -1403,6 +1438,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    */
   protected boolean shouldForceRenderOutputBuffer(long earlyUs, long elapsedSinceLastRenderUs) {
     // Force render late buffers every 100ms to avoid frozen video effect.
+    // 每 100 ms 强制渲染延迟缓冲区，以避免冻结视频效果。
     return isBufferLate(earlyUs) && elapsedSinceLastRenderUs > 100000;
   }
 
@@ -1448,6 +1484,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
    */
   protected boolean maybeDropBuffersToKeyframe(
       long positionUs, boolean treatDroppedBuffersAsSkipped) throws ExoPlaybackException {
+    // 通过positionUs跳过一些帧，修改读 sampleStream 的 pos，直到找到 pos 之前的关键帧，开始播放
     int droppedSourceBufferCount = skipSource(positionUs);
     if (droppedSourceBufferCount == 0) {
       return false;
@@ -1462,6 +1499,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
       updateDroppedBufferCounters(
           droppedSourceBufferCount, /* droppedDecoderBufferCount= */ buffersInCodecCount);
     }
+    // flush 和重新初始化解码器，清空缓冲区
     flushOrReinitializeCodec();
     if (videoFrameProcessorManager.isEnabled()) {
       videoFrameProcessorManager.flush();
@@ -1606,6 +1644,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
     TraceUtil.endSection();
     decoderCounters.renderedOutputBufferCount++;
     consecutiveDroppedFrameCount = 0;
+    //若不支持滤镜，则更新时间戳
     if (!videoFrameProcessorManager.isEnabled()) {
       lastRenderRealtimeUs = SystemClock.elapsedRealtime() * 1000;
       maybeNotifyVideoSizeChanged(decodedVideoSize);
@@ -1941,6 +1980,7 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
 
     /** Returns whether video frame processing is enabled. */
     public boolean isEnabled() {
+      //若支持滤镜，会返回true，否则返回false
       return videoFrameProcessor != null;
     }
 
@@ -2770,6 +2810,8 @@ public class MediaCodecVideoRenderer extends MediaCodecRenderer {
 
     @Override
     public void onFrameRendered(MediaCodecAdapter codec, long presentationTimeUs, long nanoTime) {
+      Log.i(TAG, "onFrameRendered: presentationTimeUs=" + presentationTimeUs + ",last = " + lastBufferPresentationTimeUs + ", time cost = " + (presentationTimeUs - lastBufferPresentationTimeUs) / 1000 + "ms");
+      lastOnFrameRenderPts = presentationTimeUs;
       // Workaround bug in MediaCodec that causes deadlock if you call directly back into the
       // MediaCodec from this listener method.
       // Deadlock occurs because MediaCodec calls this listener method holding a lock,

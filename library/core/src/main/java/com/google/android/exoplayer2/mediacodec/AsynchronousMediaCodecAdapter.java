@@ -146,6 +146,7 @@ import java.nio.ByteBuffer;
       HandlerThread enqueueingThread,
       boolean synchronizeCodecInteractionsWithQueueing) {
     this.codec = codec;
+    //两个线程，一个用于回调，一个用于队列
     this.asynchronousMediaCodecCallback = new AsynchronousMediaCodecCallback(callbackThread);
     this.bufferEnqueuer = new AsynchronousMediaCodecBufferEnqueuer(codec, enqueueingThread);
     this.synchronizeCodecInteractionsWithQueueing = synchronizeCodecInteractionsWithQueueing;

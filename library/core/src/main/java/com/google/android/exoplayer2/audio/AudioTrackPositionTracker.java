@@ -273,40 +273,61 @@ import java.lang.reflect.Method;
 
   public long getCurrentPositionUs(boolean sourceEnded) {
     if (checkNotNull(this.audioTrack).getPlayState() == PLAYSTATE_PLAYING) {
+      /* 三件重要的事：*/
+      /* 1.根据AudioTrack.getPlaybackHeadPosition的值来计算平滑抖动值  */
+      /* 2.校验timestamp 是否有效*/
+      /* 3.校验latency */
       maybeSampleSyncParams();
     }
 
     // If the device supports it, use the playback timestamp from AudioTrack.getTimestamp.
     // Otherwise, derive a smoothed position by sampling the track's frame position.
+    // 如果设备支持，请使用 AudioTrack.getTimestamp 中的播放时间戳。
+    // 否则，通过采样轨道的帧位置来导出平滑位置。
     long systemTimeUs = System.nanoTime() / 1000;
     long positionUs;
     AudioTimestampPoller audioTimestampPoller = checkNotNull(this.audioTimestampPoller);
+    // 判断是否 AudioTrack.getTimestamp 更新了时间戳
     boolean useGetTimestampMode = audioTimestampPoller.hasAdvancingTimestamp();
+    // if分支为设备支持的timestamp模式,else为AudioTrack.getPlaybackHeadPosition获取的处理方式
     if (useGetTimestampMode) {
       // Calculate the speed-adjusted position using the timestamp (which may be in the future).
+      // 得到最新调用getTimestamp()接口时拿到的写入帧数
       long timestampPositionFrames = audioTimestampPoller.getTimestampPositionFrames();
+      // 将总帧数转化为持续时间，即当前音频播放位置的时间戳
       long timestampPositionUs = sampleCountToDurationUs(timestampPositionFrames, outputSampleRate);
+      // 计算当前系统时间与底层音频更新帧数时系统时间的差值
       long elapsedSinceTimestampUs = systemTimeUs - audioTimestampPoller.getTimestampSystemTimeUs();
+      // 对差值时间做一个校准，基于倍速进行校准。（毕竟 audioTimestampPoller.getTimestampSystemTimeUs 也是一个估计值，需要和当前时间进行一个矫正）
       elapsedSinceTimestampUs =
           Util.getMediaDurationForPlayoutDuration(elapsedSinceTimestampUs, audioTrackPlaybackSpeed);
+      // 得到最新的音频时间戳（当前播放位置的时间戳 + 校正值 即为当前的播放位置时间戳）
       positionUs = timestampPositionUs + elapsedSinceTimestampUs;
     } else {
+      // 走 AudioTrack.getPlaybackHeadPosition 获取播放位置
       if (playheadOffsetCount == 0) {
         // The AudioTrack has started, but we don't have any samples to compute a smoothed position.
+        // AudioTrack 已经开始了，但是我们没有任何样本来计算平滑位置。直接获取
         positionUs = getPlaybackHeadPositionUs();
       } else {
         // getPlaybackHeadPositionUs() only has a granularity of ~20 ms, so we base the position off
         // the system clock (and a smoothed offset between it and the playhead position) so as to
         // prevent jitter in the reported positions.
+
+        // getPlaybackHeadPositionUs() 的粒度只保证有约 20 毫秒，
+        // 因此，我们根据系统时钟确定位置（以及它与播放头位置之间的平滑偏差）
+        // 从而防止报告位置的抖动。
         positionUs =
             Util.getMediaDurationForPlayoutDuration(
                 systemTimeUs + smoothedPlayheadOffsetUs, audioTrackPlaybackSpeed);
       }
       if (!sourceEnded) {
+        //获取到的position还要再减去一个latency
         positionUs = max(0, positionUs - latencyUs);
       }
     }
 
+    //如果模式有切换，做下保存
     if (lastSampleUsedGetTimestampMode != useGetTimestampMode) {
       // We've switched sampling mode.
       previousModeSystemTimeUs = lastSystemTimeUs;
@@ -316,12 +337,17 @@ import java.lang.reflect.Method;
     if (elapsedSincePreviousModeUs < MODE_SWITCH_SMOOTHING_DURATION_US) {
       // Use a ramp to smooth between the old mode and the new one to avoid introducing a sudden
       // jump if the two modes disagree.
+      //使用斜坡在旧模式和新模式之间进行平滑，以避免在两种模式不一致时引入突然跳跃。(模式切换的平滑处理）
+
+      //计算旧模式下的预计位置
       long previousModeProjectedPositionUs =
           previousModePositionUs
               + Util.getMediaDurationForPlayoutDuration(
                   elapsedSincePreviousModeUs, audioTrackPlaybackSpeed);
       // A ramp consisting of 1000 points distributed over MODE_SWITCH_SMOOTHING_DURATION_US.
+      //创建一个由1000个点组成的斜坡
       long rampPoint = (elapsedSincePreviousModeUs * 1000) / MODE_SWITCH_SMOOTHING_DURATION_US;
+      //使用线性插值来平滑过渡从旧模式到新模式的位置（通过加权平均实现，线性插值）
       positionUs *= rampPoint;
       positionUs += (1000 - rampPoint) * previousModeProjectedPositionUs;
       positionUs /= 1000;
@@ -465,22 +491,27 @@ import java.lang.reflect.Method;
 
   private void maybeSampleSyncParams() {
     long systemTimeUs = System.nanoTime() / 1000;
+    // 每 30ms 调用一次
     if (systemTimeUs - lastPlayheadSampleTimeUs >= MIN_PLAYHEAD_OFFSET_SAMPLE_INTERVAL_US) {
+      // 从 AudioTrack 获取播放时长
       long playbackPositionUs = getPlaybackHeadPositionUs();
       if (playbackPositionUs == 0) {
         // The AudioTrack hasn't output anything yet.
         return;
       }
       // Take a new sample and update the smoothed offset between the system clock and the playhead.
+      // 用获取到的音频 pts - 系统时间作为基准差值
       playheadOffsets[nextPlayheadOffsetIndex] =
           Util.getPlayoutDurationForMediaDuration(playbackPositionUs, audioTrackPlaybackSpeed)
               - systemTimeUs;
+      // 记录 10 次的差值
       nextPlayheadOffsetIndex = (nextPlayheadOffsetIndex + 1) % MAX_PLAYHEAD_OFFSET_COUNT;
       if (playheadOffsetCount < MAX_PLAYHEAD_OFFSET_COUNT) {
         playheadOffsetCount++;
       }
       lastPlayheadSampleTimeUs = systemTimeUs;
       smoothedPlayheadOffsetUs = 0;
+      //将近 10次 的所有偏差平均到每次偏差中进行计算再累加，即得到最新的平滑抖动偏差值
       for (int i = 0; i < playheadOffsetCount; i++) {
         smoothedPlayheadOffsetUs += playheadOffsets[i] / playheadOffsetCount;
       }
@@ -492,12 +523,28 @@ import java.lang.reflect.Method;
       return;
     }
 
+    // 校验从 AudioTrack 获取的timestamp和系统时间及 getPlaybackHeadPosition 获取的时间
     maybePollAndCheckTimestamp(systemTimeUs);
     maybeUpdateLatency(systemTimeUs);
   }
 
+
+  /**
+   * 1. 确认底层是否更新了timestamp：
+   *         首先，函数会检查底层系统是否已经更新了时间戳（timestamp）。时间戳通常用于记录特定事件的发生时间，这里指的是音频数据的播放或处理时间。
+   * 2. 系统时间对比：如果底层系统更新了时间戳，函数会将这个最新的时间戳中的系统时间与应用层当前的系统时间进行对比。
+   * 3. 时间差值判断：如果这两个时间的差值超过5秒，那么这个时间戳将不被接收。这意味着，如果时间戳记录的时间与当前时间相差超过5秒，这个时间戳可能已经过时或不准确，因此不被采用。
+   * 4. 对比AudioTrack的时间差值：此外，函数还会对比AudioTrack.getTimeStamp和AudioTrack.getPlaybackHeadPosition这两个方法获取的时间差值。
+   *         这两个方法都与音频播放的时间管理相关，getTimeStamp获取的是音频播放的时间戳，而getPlaybackHeadPosition获取的是当前播放头的位置。
+   *         两个方法获取差距理论上不应该相差巨大，相差巨大会导致后续计算音频播放位置出现异常。
+   * 5. 关键点：
+   *     函数的核心在于理解底层系统是如何确定时间戳是否已经更新的，以及在 AudioTrack 支持时间戳模式的情况下，10秒的限制时间是如何确定的（maybePollTimestamp方法）。这可能涉及到底层音频处理机制和系统对时间戳更新的频率或策略。
+   * @param systemTimeUs 当前系统时间
+   */
   private void maybePollAndCheckTimestamp(long systemTimeUs) {
+    //确认平台底层是否更新了timestamp
     AudioTimestampPoller audioTimestampPoller = checkNotNull(this.audioTimestampPoller);
+    // 检查是否 AudioTrack 是否更新了时间戳
     if (!audioTimestampPoller.maybePollTimestamp(systemTimeUs)) {
       return;
     }
@@ -505,11 +552,13 @@ import java.lang.reflect.Method;
     // Check the timestamp and accept/reject it.
     long timestampSystemTimeUs = audioTimestampPoller.getTimestampSystemTimeUs();
     long timestampPositionFrames = audioTimestampPoller.getTimestampPositionFrames();
+    // 确认 timestamp 更新时的系统时间和当前的系统时间是否差距大于 5s
     long playbackPositionUs = getPlaybackHeadPositionUs();
     if (Math.abs(timestampSystemTimeUs - systemTimeUs) > MAX_AUDIO_TIMESTAMP_OFFSET_US) {
       listener.onSystemTimeUsMismatch(
           timestampPositionFrames, timestampSystemTimeUs, systemTimeUs, playbackPositionUs);
       audioTimestampPoller.rejectTimestamp();
+      //确认AudioTrack.getTimeStamp和AudioTrack.getPlaybackHeadPosition获取的时间差值是否大于5s
     } else if (Math.abs(
             sampleCountToDurationUs(timestampPositionFrames, outputSampleRate) - playbackPositionUs)
         > MAX_AUDIO_TIMESTAMP_OFFSET_US) {
@@ -528,6 +577,7 @@ import java.lang.reflect.Method;
       try {
         // Compute the audio track latency, excluding the latency due to the buffer (leaving
         // latency due to the mixer and audio hardware driver).
+        // 这里减去 bufferSizeUs 是为了排除缓冲区造成的延迟（留下混音器和音频硬件驱动程序造成的延迟）。
         latencyUs =
             castNonNull((Integer) getLatencyMethod.invoke(checkNotNull(audioTrack))) * 1000L
                 - bufferSizeUs;
@@ -587,9 +637,12 @@ import java.lang.reflect.Method;
    * (which in practice will never happen).
    *
    * @return The playback head position, in frames.
+   *
+   * AudioTrack.getPlaybackHeadPosition()返回一个旨在解释为无符号 32 位整数的值，该值也会定期回绕。此方法将播放头位置返回为一个长整型，只有当该值超过Long.MAX_VALUE时才会回绕（实际上永远不会发生这种情况）
    */
   private long getPlaybackHeadPosition() {
     long currentTimeMs = SystemClock.elapsedRealtime();
+    // 如果处于暂停状态，则计算暂停中到暂停结束的时间间隔内计算出的帧数，作为当前的播放位置。
     if (stopTimestampUs != C.TIME_UNSET) {
       // Simulate the playback head position up to the total number of frames submitted.
       long elapsedTimeSinceStopUs = (currentTimeMs * 1000) - stopTimestampUs;
@@ -598,11 +651,13 @@ import java.lang.reflect.Method;
       long framesSinceStop = durationUsToSampleCount(mediaTimeSinceStopUs, outputSampleRate);
       return min(endPlaybackHeadPosition, stopPlaybackHeadPosition + framesSinceStop);
     }
+    // 间隔5ms以上调用
     if (currentTimeMs - lastRawPlaybackHeadPositionSampleTimeMs
         >= RAW_PLAYBACK_HEAD_POSITION_UPDATE_INTERVAL_MS) {
       updateRawPlaybackHeadPosition(currentTimeMs);
       lastRawPlaybackHeadPositionSampleTimeMs = currentTimeMs;
     }
+    // 返回播放帧数，这里处理是防止越界（AudioTrack的getPlaybackHeadPosition 是无符号32位，超过32位后，从0计数。大概率不会发生）
     return rawPlaybackHeadPosition + (rawPlaybackHeadWrapCount << 32);
   }
 

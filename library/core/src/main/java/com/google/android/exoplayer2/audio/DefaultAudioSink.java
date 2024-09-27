@@ -628,8 +628,11 @@ public final class DefaultAudioSink implements AudioSink {
     if (!isAudioTrackInitialized() || startMediaTimeUsNeedsInit) {
       return CURRENT_POSITION_NOT_SET;
     }
+    // 从 AudioTrack 获取pts
     long positionUs = audioTrackPositionTracker.getCurrentPositionUs(sourceEnded);
+    // 返回标准为 AudioTrack 和本地记录获取的二者的最小值
     positionUs = min(positionUs, configuration.framesToDurationUs(getWrittenFrames()));
+    //考虑到 AudioProcessor 的丢帧部分。
     return applySkipping(applyMediaPositionParameters(positionUs));
   }
 
@@ -832,6 +835,7 @@ public final class DefaultAudioSink implements AudioSink {
       throws InitializationException, WriteException {
     Assertions.checkArgument(inputBuffer == null || buffer == inputBuffer);
 
+    // 是否有待处理的格式变化
     if (pendingConfiguration != null) {
       if (!drainToEndOfStream()) {
         // There's still pending data in audio processors to write to the track.
@@ -863,6 +867,7 @@ public final class DefaultAudioSink implements AudioSink {
       applyAudioProcessorPlaybackParametersAndSkipSilence(presentationTimeUs);
     }
 
+    // 初始化 AudioTrack
     if (!isAudioTrackInitialized()) {
       try {
         if (!initializeAudioTrack()) {
@@ -887,13 +892,17 @@ public final class DefaultAudioSink implements AudioSink {
       if (useAudioTrackPlaybackParams()) {
         setAudioTrackPlaybackParametersV23();
       }
+
+      // 跳过静音音频
       applyAudioProcessorPlaybackParametersAndSkipSilence(presentationTimeUs);
 
+      // 开始 AudioTrack 播放
       if (playing) {
         play();
       }
     }
 
+    // 判断 AudioTrack 是否有足够能力处理 buffer
     if (!audioTrackPositionTracker.mayHandleBuffer(getWrittenFrames())) {
       return false;
     }
@@ -918,6 +927,7 @@ public final class DefaultAudioSink implements AudioSink {
         }
       }
 
+      // 格式发生变化等，消耗所有 pending 数据
       if (afterDrainParameters != null) {
         if (!drainToEndOfStream()) {
           // Don't process any more input until draining completes.
@@ -928,10 +938,12 @@ public final class DefaultAudioSink implements AudioSink {
       }
 
       // Check that presentationTimeUs is consistent with the expected value.
+      // 获取到预期当前 buffer 的 pts
       long expectedPresentationTimeUs =
           startMediaTimeUs
               + configuration.inputFramesToDurationUs(
                   getSubmittedFrames() - trimmingAudioProcessor.getTrimmedFrameCount());
+      // 预期的pts 和 实际的 pts 若大于 200ms 则认为发生了不连续
       if (!startMediaTimeUsNeedsSync
           && Math.abs(expectedPresentationTimeUs - presentationTimeUs) > 200000) {
         if (listener != null) {
@@ -939,15 +951,18 @@ public final class DefaultAudioSink implements AudioSink {
               new AudioSink.UnexpectedDiscontinuityException(
                   presentationTimeUs, expectedPresentationTimeUs));
         }
+        // 需要做调整
         startMediaTimeUsNeedsSync = true;
       }
       if (startMediaTimeUsNeedsSync) {
+        // 把所有 pending 数据消耗完
         if (!drainToEndOfStream()) {
           // Don't update timing until pending AudioProcessor buffers are completely drained.
           return false;
         }
         // Adjust startMediaTimeUs to be consistent with the current buffer's start time and the
         // number of bytes submitted.
+        // 计算出当前 buffer 的 pts 和预期的 pts 之间的差值，然后调整 startMediaTimeUs
         long adjustmentUs = presentationTimeUs - expectedPresentationTimeUs;
         startMediaTimeUs += adjustmentUs;
         startMediaTimeUsNeedsSync = false;
@@ -1045,11 +1060,13 @@ public final class DefaultAudioSink implements AudioSink {
    *     or {@link C#TIME_END_OF_SOURCE} when draining remaining buffers at the end of the stream.
    */
   private void processBuffers(long avSyncPresentationTimeUs) throws WriteException {
+    //AudioProcessingPipeline 是否存在 AudioProcessor ，不存在，则直接走 AudioTrack 音频渲染
     if (!audioProcessingPipeline.isOperational()) {
       writeBuffer(inputBuffer != null ? inputBuffer : EMPTY_BUFFER, avSyncPresentationTimeUs);
       return;
     }
 
+    // 遍历循环所有 AudioProcessor ，获取其产生的音频 buffer 数据给到 AudioTrack 渲染
     while (!audioProcessingPipeline.isEnded()) {
       ByteBuffer bufferToWrite;
       while ((bufferToWrite = audioProcessingPipeline.getOutput()).hasRemaining()) {
@@ -1062,6 +1079,8 @@ public final class DefaultAudioSink implements AudioSink {
       if (inputBuffer == null || !inputBuffer.hasRemaining()) {
         return;
       }
+      // 喂入最新的音频 buffer 给到 AudioProcessingPipeline
+      // 分发给 AudioProcessor 处理 （AudioProcessingPipeline 就是个链表，里面包含了所有的 AudioProcessor， 一个 AudioProcessor 的输出就是另一个 AudioProcessor 的输入）
       audioProcessingPipeline.queueInput(inputBuffer);
     }
   }
@@ -1146,6 +1165,7 @@ public final class DefaultAudioSink implements AudioSink {
 
     lastFeedElapsedRealtimeMs = SystemClock.elapsedRealtime();
 
+    //异常处理
     if (bytesWrittenOrError < 0) {
       int error = bytesWrittenOrError;
 
@@ -1190,6 +1210,7 @@ public final class DefaultAudioSink implements AudioSink {
       }
     }
 
+    // 记录写入的 pcm 数据量
     if (configuration.outputMode == OUTPUT_MODE_PCM) {
       writtenPcmBytes += bytesWritten;
     }

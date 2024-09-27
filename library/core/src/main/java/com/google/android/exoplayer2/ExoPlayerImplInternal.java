@@ -956,6 +956,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
                 Player.DISCONTINUITY_REASON_INTERNAL);
       }
     } else {
+      //在这里面处理pts，这个就是音频时钟。
       rendererPositionUs =
           mediaClock.syncAndGetPositionUs(
               /* isReadingAhead= */ playingPeriodHolder != queue.getReadingPeriod());
@@ -1028,6 +1029,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
     TraceUtil.beginSection("doSomeWork");
 
+    //更新音频时间戳
     updatePlaybackPositions();
 
     boolean renderersEnded = true;

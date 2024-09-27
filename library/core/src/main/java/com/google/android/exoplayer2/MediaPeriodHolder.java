@@ -300,6 +300,7 @@ import org.checkerframework.checker.nullness.compatqual.NullableType;
     trackSelectorResult = newTrackSelectorResult;
     enableTrackSelectionsInResult();
     // Disable streams on the period and get new streams for updated/newly-enabled tracks.
+    //将sampleStreams属性和mediaPeriod的 sampleQueue关联起来，后续解码器就是拿这个sampleQueue来解码的
     positionUs =
         mediaPeriod.selectTracks(
             newTrackSelectorResult.selections,

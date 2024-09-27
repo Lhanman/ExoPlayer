@@ -254,32 +254,46 @@ public final class VideoFrameReleaseHelper {
    */
   public long adjustReleaseTime(long releaseTimeNs) {
     // Until we know better, the adjustment will be a no-op.
+    Log.i(TAG, "base releaseTime come .it is = " + releaseTimeNs);
+    // 定义调整后的送显时间
     long adjustedReleaseTimeNs = releaseTimeNs;
 
+    // 判断是否有上一帧的送显时间，且帧率估计器是否已经同步，若同步则可使用估计值作为预测送显时间。可以保证送显时间的连续性，提升流畅度
     if (lastAdjustedFrameIndex != C.INDEX_UNSET && frameRateEstimator.isSynced()) {
+      //获取平均每帧的持续时间
       long frameDurationNs = frameRateEstimator.getFrameDurationNs();
+      //当前帧送显时间 = 上一帧送显的时间（已确定） + 平均每帧的持续时间
       long candidateAdjustedReleaseTimeNs =
           lastAdjustedReleaseTimeNs
               + (long) ((frameDurationNs * (frameIndex - lastAdjustedFrameIndex)) / playbackSpeed);
+      Log.i(TAG, "frame rate estimator is synced, candidateAdjustedReleaseTimeNs = " + candidateAdjustedReleaseTimeNs);
+      //校准过后的送显时间偏差值检查，检查调整范围是否大于 20ms。
       if (adjustmentAllowed(releaseTimeNs, candidateAdjustedReleaseTimeNs)) {
+        Log.i(TAG, "is allowed to adjust, adjust to candidateAdjustedReleaseTimeNs");
         adjustedReleaseTimeNs = candidateAdjustedReleaseTimeNs;
       } else {
+        Log.i(TAG, "is not allowed to adjust, adjust to releaseTimeNs");
         resetAdjustment();
       }
     }
     pendingLastAdjustedFrameIndex = frameIndex;
     pendingLastAdjustedReleaseTimeNs = adjustedReleaseTimeNs;
 
+    // 若不支持VSYNC，则直接返回调整后的送显时间
     if (vsyncSampler == null || vsyncDurationNs == C.TIME_UNSET) {
       return adjustedReleaseTimeNs;
     }
+    // 获取帧开始渲染的时间
     long sampledVsyncTimeNs = vsyncSampler.sampledVsyncTimeNs;
     if (sampledVsyncTimeNs == C.TIME_UNSET) {
       return adjustedReleaseTimeNs;
     }
+    Log.i(TAG, "sampledVsyncTimeNs = " + sampledVsyncTimeNs + ",adjust release time = " + adjustedReleaseTimeNs + ",interval = " + (adjustedReleaseTimeNs - sampledVsyncTimeNs)/1_000_000 + "ms");
     // Find the timestamp of the closest vsync. This is the vsync that we're targeting.
+    /* 根据视频刷新率寻找最近的送显时间点 */
     long snappedTimeNs = closestVsync(adjustedReleaseTimeNs, sampledVsyncTimeNs, vsyncDurationNs);
     // Apply an offset so that we release before the target vsync, but after the previous one.
+    /* 提前送显：MediaCodec给的建议是最好提前两个vsync，但实际上exoplayer仅仅提前了0.8个vsync，原因不明 */
     return snappedTimeNs - vsyncOffsetNs;
   }
 
@@ -367,6 +381,7 @@ public final class VideoFrameReleaseHelper {
     }
     this.surfacePlaybackFrameRate = surfacePlaybackFrameRate;
     Api30.setSurfaceFrameRate(surface, surfacePlaybackFrameRate);
+    Log.i(TAG, "setSurfaceFrameRate = " + surfacePlaybackFrameRate);
   }
 
   /**
@@ -401,10 +416,14 @@ public final class VideoFrameReleaseHelper {
   }
 
   private static long closestVsync(long releaseTime, long sampledVsyncTime, long vsyncDuration) {
+    //计算到送显时间段，需要刷新屏幕多少次
     long vsyncCount = (releaseTime - sampledVsyncTime) / vsyncDuration;
+    Log.i(TAG, "vsyncCount = " + vsyncCount + ", vsync duration = " + vsyncDuration);
+    //计算出理论的刷新屏幕时间
     long snappedTimeNs = sampledVsyncTime + (vsyncDuration * vsyncCount);
     long snappedBeforeNs;
     long snappedAfterNs;
+    //计算两种情况下，距离送显时间最近的前后两个刷新点
     if (releaseTime <= snappedTimeNs) {
       snappedBeforeNs = snappedTimeNs - vsyncDuration;
       snappedAfterNs = snappedTimeNs;
@@ -412,8 +431,12 @@ public final class VideoFrameReleaseHelper {
       snappedBeforeNs = snappedTimeNs;
       snappedAfterNs = snappedTimeNs + vsyncDuration;
     }
+    Log.i(TAG, "snappedBeforeNs = " + snappedBeforeNs + ", snappedAfterNs = " + snappedAfterNs);
+    //计算送显时间与前后两个刷新点的时间之差
     long snappedAfterDiff = snappedAfterNs - releaseTime;
     long snappedBeforeDiff = releaseTime - snappedBeforeNs;
+    Log.i(TAG, "snappedAfterDiff = " + snappedAfterDiff/1_000_000 + "ms" + ", snappedBeforeDiff = " + snappedBeforeDiff/1_000_000 + "ms");
+    // 哪个刷新点近就选哪个作为最终的送显时间
     return snappedAfterDiff < snappedBeforeDiff ? snappedAfterNs : snappedBeforeNs;
   }
 
@@ -573,6 +596,7 @@ public final class VideoFrameReleaseHelper {
     private final HandlerThread choreographerOwnerThread;
     private @MonotonicNonNull Choreographer choreographer;
     private int observerCount;
+    private long lastDoFrame = 0L;
 
     public static VSyncSampler getInstance() {
       return INSTANCE;
@@ -605,6 +629,8 @@ public final class VideoFrameReleaseHelper {
     @Override
     public void doFrame(long vsyncTimeNs) {
       sampledVsyncTimeNs = vsyncTimeNs;
+      Log.i(TAG, "vsyncTimeNs = " + vsyncTimeNs + ", lastDoFrame = " + lastDoFrame + ", diff = " + (vsyncTimeNs - lastDoFrame)/1_000_000 + "ms");
+      lastDoFrame = vsyncTimeNs;
       checkNotNull(choreographer).postFrameCallbackDelayed(this, VSYNC_SAMPLE_UPDATE_PERIOD_MS);
     }
 

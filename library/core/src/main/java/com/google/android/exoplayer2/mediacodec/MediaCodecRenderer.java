@@ -509,14 +509,16 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       return;
     }
 
+    // 判断format是否可以不需要创建codec， 不如音频raw数据
     if (isBypassPossible(inputFormat)) {
       initBypass(inputFormat);
       return;
     }
 
+    // drm 加密相关
     setCodecDrmSession(sourceDrmSession);
-
     String mimeType = inputFormat.sampleMimeType;
+    // drm 加密相关
     if (codecDrmSession != null) {
       @Nullable CryptoConfig cryptoConfig = codecDrmSession.getCryptoConfig();
       if (mediaCrypto == null) {
@@ -559,6 +561,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     }
 
     try {
+      // 实际创建codec函数
       maybeInitCodecWithFallback(mediaCrypto, mediaCryptoRequiresSecureDecoder);
     } catch (DecoderInitializationException e) {
       throw createRendererException(
@@ -672,6 +675,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
   @Override
   protected void onEnabled(boolean joining, boolean mayRenderStartOfStream)
       throws ExoPlaybackException {
+    //用于记录解码信息
     decoderCounters = new DecoderCounters();
   }
 
@@ -728,6 +732,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       throws ExoPlaybackException {
     this.currentPlaybackSpeed = currentPlaybackSpeed;
     this.targetPlaybackSpeed = targetPlaybackSpeed;
+    //实际操作速率的设置
     updateCodecOperatingRate(codecInputFormat);
   }
 
@@ -789,8 +794,18 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     // Do nothing. Overridden to remove throws clause.
   }
 
+  /**
+   * 核心方法.会循环运行。它检查输出流是否已结束，读取输入格式（如果尚未可用），在必要时初始化编解码器，并处理输入和输出缓冲区。
+   * positionUs 为当前的播放时间戳，如果有音轨会获取音轨的PTS
+   * @param positionUs The current media time in microseconds, measured at the start of the current
+   *     iteration of the rendering loop.
+   * @param elapsedRealtimeUs {@link android.os.SystemClock#elapsedRealtime()} in microseconds,
+   *     measured at the start of the current iteration of the rendering loop.
+   * @throws ExoPlaybackException
+   */
   @Override
   public void render(long positionUs, long elapsedRealtimeUs) throws ExoPlaybackException {
+    // 在 tunneling 模式下，接收到EOS时调用 （tunneling 模式运行在 API 23 以上，允许音频和视频数据直接从媒体编解码器传输到音频/视频输出硬件，绕过了常规的处理路径。）
     if (pendingOutputEndOfStream) {
       pendingOutputEndOfStream = false;
       processEndOfStream();
@@ -802,15 +817,19 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     }
 
     try {
+      // 如果输出流已结束，则渲染到流的末尾
       if (outputStreamEnded) {
         renderToEndOfStream();
         return;
       }
+
       if (inputFormat == null && !readSourceOmittingSampleData(FLAG_REQUIRE_FORMAT)) {
+        // 尝试读取 sharedSampleMetadata 中的数据,判断 format是否准备好了。
         // We still don't have a format and can't make progress without one.
         return;
       }
       // We have a format.
+      //存在 format 可以开始初始化解码器了
       maybeInitCodecOrBypass();
       if (bypassEnabled) {
         TraceUtil.beginSection("bypassRender");
@@ -819,8 +838,10 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       } else if (codec != null) {
         long renderStartTimeMs = SystemClock.elapsedRealtime();
         TraceUtil.beginSection("drainAndFeed");
+        // 循环处理输出缓冲区 (核心方法）
         while (drainOutputBuffer(positionUs, elapsedRealtimeUs)
             && shouldContinueRendering(renderStartTimeMs)) {}
+        // 循环处理输入缓冲区 (核心方法）
         while (feedInputBuffer() && shouldContinueRendering(renderStartTimeMs)) {}
         TraceUtil.endSection();
       } else {
@@ -1000,14 +1021,22 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     return false;
   }
 
+  /**
+   *
+   * @param crypto
+   * @param mediaCryptoRequiresSecureDecoder
+   * @throws DecoderInitializationException
+   */
   private void maybeInitCodecWithFallback(
       @Nullable MediaCrypto crypto, boolean mediaCryptoRequiresSecureDecoder)
       throws DecoderInitializationException {
     if (availableCodecInfos == null) {
       try {
+        // 查询可用解码器列表
         List<MediaCodecInfo> allAvailableCodecInfos =
             getAvailableCodecInfos(mediaCryptoRequiresSecureDecoder);
         availableCodecInfos = new ArrayDeque<>();
+        //若支持后备方案，则将所有可用解码器加入到availableCodecInfos中
         if (enableDecoderFallback) {
           availableCodecInfos.addAll(allAvailableCodecInfos);
         } else if (!allAvailableCodecInfos.isEmpty()) {
@@ -1033,15 +1062,18 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
 
     MediaCodecInfo preferredCodecInfo = availableCodecInfos.peekFirst();
     while (codec == null) {
+      //取第一个解码器
       MediaCodecInfo codecInfo = availableCodecInfos.peekFirst();
       if (!shouldInitCodec(codecInfo)) {
         return;
       }
       try {
         try {
+          //初始化解码器  codecInfo:解码器信息，crypto:加密信息
           initCodec(codecInfo, crypto);
         } catch (Exception e) {
           if (codecInfo == preferredCodecInfo) {
+            //重试
             // If creating the preferred decoder failed then sleep briefly before retrying.
             // Workaround for [internal b/191966399].
             // See also https://github.com/google/ExoPlayer/issues/8696.
@@ -1128,6 +1160,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     if (codecOperatingRate <= assumedMinimumCodecOperatingRate) {
       codecOperatingRate = CODEC_OPERATING_RATE_UNSET;
     }
+    //MediaCodec初始化准备
     onReadyToInitializeCodec(inputFormat);
     codecInitializingTimestamp = SystemClock.elapsedRealtime();
     MediaCodecAdapter.Configuration configuration =
@@ -1137,6 +1170,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     }
     try {
       TraceUtil.beginSection("createCodec:" + codecName);
+      // 通过工厂创建解码器
       codec = codecAdapterFactory.createAdapter(configuration);
     } finally {
       TraceUtil.endSection();
@@ -1227,14 +1261,17 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     }
 
     if (inputIndex < 0) {
+      //获取 Medaicodec 的输入缓冲区
       inputIndex = codec.dequeueInputBufferIndex();
       if (inputIndex < 0) {
         return false;
       }
+      // 输入缓冲区设置
       buffer.data = codec.getInputBuffer(inputIndex);
       buffer.clear();
     }
 
+    // eos 流处理
     if (codecDrainState == DRAIN_STATE_SIGNAL_END_OF_STREAM) {
       // We need to re-initialize the codec. Send an end of stream signal to the existing codec so
       // that it outputs any remaining buffers before we release it.
@@ -1249,15 +1286,18 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       return false;
     }
 
+    // 部分设备的兼容性处理，有些设备需要在初始化的时候，输出 ssp + pps + 32*32 IDR数据
     if (codecNeedsAdaptationWorkaroundBuffer) {
       codecNeedsAdaptationWorkaroundBuffer = false;
       buffer.data.put(ADAPTATION_WORKAROUND_BUFFER);
       codec.queueInputBuffer(inputIndex, 0, ADAPTATION_WORKAROUND_BUFFER.length, 0, 0);
       resetInputBuffer();
       codecReceivedBuffers = true;
+      // 需要重新运行 feedInputBuffer，喂入真正的数据
       return true;
     }
 
+    // 如果是重新配置状态，需要喂入重新配置数据
     // For adaptive reconfiguration, decoders expect all reconfiguration data to be supplied at
     // the start of the buffer that also contains the first frame in the new format.
     if (codecReconfigurationState == RECONFIGURATION_STATE_WRITE_PENDING) {
@@ -1273,6 +1313,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
 
     @SampleStream.ReadDataResult int result;
     try {
+      // 这里开始读取数据了，具体是读 SampleQueue 数据 （由解复用器输出到的 buffer），读到 buffer 内
       result = readSource(formatHolder, buffer, /* readFlags= */ 0);
     } catch (InsufficientCapacityException e) {
       onCodecError(e);
@@ -1291,6 +1332,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     if (result == C.RESULT_NOTHING_READ) {
       return false;
     }
+    // 读到了 format 数据，可能会发生 format 变化。
     if (result == C.RESULT_FORMAT_READ) {
       if (codecReconfigurationState == RECONFIGURATION_STATE_QUEUE_PENDING) {
         // We received two formats in a row. Clear the current buffer of any reconfiguration data
@@ -1303,6 +1345,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
     }
 
     // We've read a buffer.
+    // 处理EOS
     if (buffer.isEndOfStream()) {
       if (codecReconfigurationState == RECONFIGURATION_STATE_QUEUE_PENDING) {
         // We received a new format immediately before the end of the stream. We need to clear
@@ -1352,6 +1395,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       return true;
     }
 
+    // 判断是否加密的
     boolean bufferEncrypted = buffer.isEncrypted();
     if (bufferEncrypted) {
       buffer.cryptoInfo.increaseClearDataFirstSubSampleBy(adaptiveReconfigurationBytes);
@@ -1379,6 +1423,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
               c2Mp3TimestampTracker.getLastOutputBufferPresentationTimeUs(inputFormat));
     }
 
+    // 该 buffer 是否仅做解码，不做渲染
     if (buffer.isDecodeOnly()) {
       decodeOnlyPresentationTimestamps.add(presentationTimeUs);
     }
@@ -1398,6 +1443,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
 
     onQueueInputBuffer(buffer);
     try {
+      // 将 视频/音频 数据喂入到解码器
       if (bufferEncrypted) {
         codec.queueSecureInputBuffer(
             inputIndex, /* offset= */ 0, buffer.cryptoInfo, presentationTimeUs, /* flags= */ 0);
@@ -1755,6 +1801,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       return true;
     }
 
+    //初始化或者 codec 不可用情况下，没必要修改速率
     if (codec == null
         || codecDrainAction == DRAIN_ACTION_REINITIALIZE
         || getState() == STATE_DISABLED) {
@@ -1762,6 +1809,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
       return true;
     }
 
+    // 取 stream 中 所有format最大帧率或采样率。防止后续切换到其他视频源或音频源后，无法倍速播放
     float newCodecOperatingRate =
         getCodecOperatingRateV23(targetPlaybackSpeed, format, getStreamFormats());
     if (codecOperatingRate == newCodecOperatingRate) {
@@ -1871,6 +1919,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
         outputIndex = codec.dequeueOutputBufferIndex(outputBufferInfo);
       }
 
+      // outputIndex == -2 表示输出格式发生变化
       if (outputIndex < 0) {
         if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED /* (-2) */) {
           processOutputMediaFormatChanged();
@@ -1942,6 +1991,7 @@ public abstract class MediaCodecRenderer extends BaseRenderer {
         return false;
       }
     } else {
+      // 处理输出缓冲区，会进行音画同步和视频渲染操作（video),音频播放渲染操作（audio）
       processedOutputBuffer =
           processOutputBuffer(
               positionUs,

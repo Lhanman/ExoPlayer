@@ -128,6 +128,10 @@ import com.google.android.exoplayer2.util.StandaloneMediaClock;
    * @param isReadingAhead Whether the renderers are reading ahead.
    */
   public long syncAndGetPositionUs(boolean isReadingAhead) {
+    //isReadingAhead，它的值是由上面的表达式playingPeriodHolder != queue.getReadingPeriod()来得到的，
+    // 也就是说，如果码流里面解析出来有带pts，那么将会使用码流中的pts来进行后续的同步处理，
+    // 否则会定义一个独立媒体时钟，用来进行后续的同步处理。主要是为了解决无音频，视频无法正常播放的问题。否则视频无时间戳进行同步就会卡住
+    //检查是否需要切换时钟
     syncClocks(isReadingAhead);
     return getPositionUs();
   }
@@ -158,7 +162,7 @@ import com.google.android.exoplayer2.util.StandaloneMediaClock;
   }
 
   private void syncClocks(boolean isReadingAhead) {
-    if (shouldUseStandaloneClock(isReadingAhead)) {
+    if (true) {
       isUsingStandaloneClock = true;
       if (standaloneClockIsStarted) {
         standaloneClock.start();
@@ -167,10 +171,12 @@ import com.google.android.exoplayer2.util.StandaloneMediaClock;
     }
     // We are either already using the renderer clock or switching from the standalone to the
     // renderer clock, so it must be non-null.
+    //我们要么已经在使用渲染器时钟，要么从独立时钟切换到渲染器时钟，因此它必须为非空。
     MediaClock rendererClock = Assertions.checkNotNull(this.rendererClock);
     long rendererClockPositionUs = rendererClock.getPositionUs();
     if (isUsingStandaloneClock) {
       // Ensure enabling the renderer clock doesn't jump backwards in time.
+      // 确保启用渲染器时钟不会在时间上倒退。
       if (rendererClockPositionUs < standaloneClock.getPositionUs()) {
         standaloneClock.stop();
         return;
@@ -181,7 +187,9 @@ import com.google.android.exoplayer2.util.StandaloneMediaClock;
       }
     }
     // Continuously sync stand-alone clock to renderer clock so that it can take over if needed.
+    // 持续将独立时钟同步到渲染器时钟，以便它可以在需要时接管音频时钟。
     standaloneClock.resetPosition(rendererClockPositionUs);
+    //音频速率、音调是否发生改变？
     PlaybackParameters playbackParameters = rendererClock.getPlaybackParameters();
     if (!playbackParameters.equals(standaloneClock.getPlaybackParameters())) {
       standaloneClock.setPlaybackParameters(playbackParameters);

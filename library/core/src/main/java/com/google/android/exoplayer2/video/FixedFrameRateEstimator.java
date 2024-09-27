@@ -192,7 +192,7 @@ import java.util.Arrays;
       if (frameCount == 0) {
         firstFramePresentationTimeNs = framePresentationTimeNs;
       } else if (frameCount == 1) {
-        // This is the frame duration that the tracker will match against.
+        //
         firstFrameDurationNs = framePresentationTimeNs - firstFramePresentationTimeNs;
         matchingFrameDurationSumNs = firstFrameDurationNs;
         matchingFrameCount = 1;

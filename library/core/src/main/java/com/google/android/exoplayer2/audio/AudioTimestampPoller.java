@@ -125,9 +125,19 @@ import java.lang.annotation.Target;
    *
    * @param systemTimeUs The current system time, in microseconds.
    * @return Whether the timestamp was updated.
+   *
+   * 如果需要，轮询时间戳并返回它是否已更新。如果true ，则可通过getTimestampSystemTimeUs()和getTimestampPositionFrames()获取最新时间戳，并且调用者应在时间戳有效时调用acceptTimestamp() ，否则应rejectTimestamp() 。
+   * hasTimestamp()和hasAdvancingTimestamp()返回的值可能会更新。
+   * 参数：
+   * systemTimeUs – 当前系统时间，以微秒为单位。
+   * 返回：
+   * 时间戳是否已更新。
+   *
+   * 状态变化 ： STATE_INITIALIZING(10ms)—>STATE_TIMESTAMP(10ms)—>STATE_TIMESTAMP_ADVANCING(10s)
    */
   @TargetApi(19) // audioTimestamp will be null if Util.SDK_INT < 19.
   public boolean maybePollTimestamp(long systemTimeUs) {
+    //if循环确保每10s调用一次（若当前状态处于 STATE_TIMESTAMP_ADVANCING 或 STATE_NO_TIMESTAMP 时）
     if (audioTimestamp == null || (systemTimeUs - lastTimestampSampleTimeUs) < sampleIntervalUs) {
       return false;
     }
@@ -142,6 +152,7 @@ import java.lang.annotation.Target;
             updateState(STATE_TIMESTAMP);
           } else {
             // Drop the timestamp, as it was sampled before the last reset.
+            // 可以丢弃这次更新，因为它是在最后一次重置之前采样的。
             updatedTimestamp = false;
           }
         } else if (systemTimeUs - initializeSystemTimeUs > INITIALIZING_DURATION_US) {
@@ -149,6 +160,7 @@ import java.lang.annotation.Target;
           // current audio route. Poll infrequently in case the route changes later.
           // TODO: Ideally we should listen for audio route changes in order to detect when a
           // timestamp becomes available again.
+          // TODO：理想情况下，我们应该监听音频路由的变化，以便检测时间戳何时再次可用。
           updateState(STATE_NO_TIMESTAMP);
         }
         break;
@@ -301,11 +313,13 @@ import java.lang.annotation.Target;
       boolean updated = audioTrack.getTimestamp(audioTimestamp);
       if (updated) {
         long rawPositionFrames = audioTimestamp.framePosition;
+        // 由于 framePosition 是无符号32位，若越界，则会重新计算
         if (lastTimestampRawPositionFrames > rawPositionFrames) {
           // The value must have wrapped around.
           rawTimestampFramePositionWrapCount++;
         }
         lastTimestampRawPositionFrames = rawPositionFrames;
+        // 存储64位的音频位置。
         lastTimestampPositionFrames =
             rawPositionFrames + (rawTimestampFramePositionWrapCount << 32);
       }

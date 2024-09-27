@@ -50,7 +50,9 @@ public abstract class BaseRenderer implements Renderer, RendererCapabilities {
   private int index;
   private @MonotonicNonNull PlayerId playerId;
   private int state;
+  // 音频/视频流数据，通过 extractor 模块解复用。本质也是一个 Buffer 缓冲区。内部进行 buffer 内存管理
   @Nullable private SampleStream stream;
+  //数组的原因是一个 period 可能会存在多个不同格式的音频/视频流数据（可能宽高会发生变化，主要是为了实现无缝切换）
   @Nullable private Format[] streamFormats;
   private long streamOffsetUs;
   private long lastResetPositionUs;
@@ -472,6 +474,22 @@ public abstract class BaseRenderer implements Renderer, RendererCapabilities {
         readingPositionUs = C.TIME_END_OF_SOURCE;
         return streamIsFinal ? C.RESULT_BUFFER_READ : C.RESULT_NOTHING_READ;
       }
+
+      /*
+      这里加是为了处理媒体流的时间基准差异。它用于处理分段媒体、多部分流或者时间基准不同的情况。
+      它允许系统无缝地处理可能由多个部分组成的复杂媒体内容，同时保持时间戳的一致性和准确性
+      时间坐标转换：
+            流内相对时间 → 全局时间
+            通过加上 streamOffsetUs，将流内的相对时间转换为整个媒体内容的绝对时间。
+
+      实际场景：
+        假设正在读取视频的第二部分（60-120秒）：
+        流内读取到时间戳为 10秒
+        streamOffsetUs 为 60秒
+        实际全局时间应为 70秒 (10秒 + 60秒偏移)
+       */
+
+
       buffer.timeUs += streamOffsetUs;
       readingPositionUs = max(readingPositionUs, buffer.timeUs);
     } else if (result == C.RESULT_FORMAT_READ) {
@@ -499,6 +517,19 @@ public abstract class BaseRenderer implements Renderer, RendererCapabilities {
    * @return The number of samples that were skipped.
    */
   protected int skipSource(long positionUs) {
+     /*
+     为什么要减去 streamOffsetUs：
+            方法参数 positionUs 是基于整个媒体内容的绝对时间。
+            而底层的 stream.skipData() 方法可能只知道当前流段的相对时间。
+            通过减去 streamOffsetUs，我们将绝对时间转换为当前流段的相对时间。
+      这里加是为了处理媒体流的时间基准差异。它用于处理分段媒体、多部分流或者时间基准不同的情况。
+      假设我们有一个由多个部分组成的视频：
+      第一部分：0-60秒
+      第二部分：60-120秒
+      当前正在播放第二部分，streamOffsetUs 为 60,000,000 (60秒)
+      如果要跳转到整个视频的第80秒 (positionUs = 80,000,000)
+      实际需要跳转到流内的第20秒 (80秒 - 60秒偏移)
+       */
     return Assertions.checkNotNull(stream).skipData(positionUs - streamOffsetUs);
   }
 
